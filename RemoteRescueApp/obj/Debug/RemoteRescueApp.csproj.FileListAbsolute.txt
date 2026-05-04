@@ -1,0 +1,6 @@
+D:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\obj\Debug\RemoteRescueApp.csprojResolveAssemblyReference.cache
+D:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Debug\RemoteRescueApp.exe.config
+D:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Debug\RemoteRescueApp.exe
+D:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Debug\RemoteRescueApp.pdb
+D:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\obj\Debug\RemoteRescueApp.exe
+D:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\obj\Debug\RemoteRescueApp.pdb

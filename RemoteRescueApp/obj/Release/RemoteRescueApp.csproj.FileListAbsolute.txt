@@ -1,0 +1,16 @@
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\bg\bg-1.jpg
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\bg\bg-2.jpg
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\bg\bg-3.jpg
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\bg\bg-4.mp4
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\bg\bg-5.mp4
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\css\style.css
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\index.html
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\js\auth-check.js
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\js\auth.js
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\js\bg-random.js
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\js\main.js
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\WebResource\main.html
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\RemoteRescueApp.exe.config
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\bin\Release\RemoteRescueApp.exe
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\obj\Release\RemoteRescueApp.csprojResolveAssemblyReference.cache
+d:\MCZLFVisualStudio\TraeProject\RemoteRescue\RemoteRescueApp\obj\Release\RemoteRescueApp.exe
