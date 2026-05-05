@@ -8,6 +8,14 @@
     <script src="js/bg-random.js?v=3"></script>
     <script src="js/auth-check.js?v=3"></script>
     <script>
+        // 清理地址栏中的token参数
+        (function() {
+            var url = new URL(window.location.href);
+            if (url.searchParams.has('_token')) {
+                url.searchParams.delete('_token');
+                window.history.replaceState({}, '', url.toString());
+            }
+        })();
         if (!AuthCheck.checkAuth()) {
             throw new Error('未授权访问');
         }

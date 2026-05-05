@@ -3,6 +3,7 @@ const API_BASE_URL = '';
 let currentAction = null;
 let confirmCallback = null;
 let statusUpdateInterval = null;
+let csrfToken = '';
 
 const systemInfo = {
     machineName: '--',
@@ -19,9 +20,12 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function init() {
-    updateSystemInfo();
-    startStatusUpdate();
-    
+    // 获取CSRF Token
+    fetchCsrfToken().then(() => {
+        updateSystemInfo();
+        startStatusUpdate();
+    });
+
     document.addEventListener('visibilitychange', function() {
         if (document.hidden) {
             stopStatusUpdate();
@@ -32,13 +36,31 @@ function init() {
     });
 }
 
+async function fetchCsrfToken() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/csrf-token`, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+        const data = await response.json();
+        if (data.success && data.token) {
+            csrfToken = data.token;
+        }
+    } catch (error) {
+        console.error('获取CSRF Token失败:', error);
+    }
+}
+
 function startStatusUpdate() {
     if (statusUpdateInterval) {
         clearInterval(statusUpdateInterval);
     }
-    
+
     updateSystemInfo();
-    
+
     statusUpdateInterval = setInterval(() => {
         updateSystemInfo();
     }, 5000);
@@ -57,15 +79,21 @@ async function updateSystemInfo() {
             method: 'GET',
             headers: {
                 'Accept': 'application/json'
-            }
+            },
+            credentials: 'same-origin'
         });
+
+        if (response.status === 401) {
+            window.location.href = 'index.html';
+            return;
+        }
 
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
         const data = await response.json();
-        
+
         if (data.success && data.data) {
             parseSystemInfo(data.data.systemInfo);
             systemInfo.explorerInfo = data.data.explorerInfo || '--';
@@ -75,7 +103,7 @@ async function updateSystemInfo() {
     } catch (error) {
         console.error('获取系统信息失败:', error);
         updateConnectionStatus(false);
-        
+
         systemInfo.lastUpdate = new Date().toLocaleString('zh-CN');
         document.getElementById('lastUpdate').textContent = systemInfo.lastUpdate;
     }
@@ -83,13 +111,13 @@ async function updateSystemInfo() {
 
 function parseSystemInfo(infoString) {
     if (!infoString) return;
-    
+
     const parts = infoString.split(' | ');
-    
+
     parts.forEach(part => {
         const [key, value] = part.split(': ');
         if (!value) return;
-        
+
         switch(key.trim()) {
             case '计算机名':
                 systemInfo.machineName = value.trim();
@@ -108,7 +136,7 @@ function parseSystemInfo(infoString) {
                 break;
         }
     });
-    
+
     systemInfo.lastUpdate = new Date().toLocaleString('zh-CN');
 }
 
@@ -119,8 +147,7 @@ function updateUI() {
     document.getElementById('processorCount').textContent = systemInfo.processorCount;
     document.getElementById('uptime').textContent = systemInfo.uptime;
     document.getElementById('lastUpdate').textContent = systemInfo.lastUpdate;
-    
-    // 更新Explorer信息
+
     const explorerEl = document.getElementById('explorerInfo');
     if (explorerEl) {
         explorerEl.textContent = systemInfo.explorerInfo;
@@ -130,7 +157,7 @@ function updateUI() {
 function updateConnectionStatus(connected) {
     const statusEl = document.getElementById('connectionStatus');
     const statusText = document.getElementById('statusText');
-    
+
     if (connected) {
         statusEl.classList.remove('offline');
         statusText.textContent = '已连接';
@@ -148,29 +175,36 @@ function restartRDP() {
         async () => {
             const btn = document.getElementById('btnRdp');
             const statusEl = document.getElementById('statusRdp');
-            
+
             setButtonLoading(btn, true);
             showStatus(statusEl, '正在重启RDP服务...', 'info');
-            
+
             try {
                 const response = await fetch(`${API_BASE_URL}/api/restart/rdp`, {
                     method: 'POST',
                     headers: {
-                        'Accept': 'application/json'
-                    }
+                        'Accept': 'application/json',
+                        'X-CSRF-Token': csrfToken
+                    },
+                    credentials: 'same-origin'
                 });
-                
+
+                if (response.status === 401) {
+                    window.location.href = 'index.html';
+                    return;
+                }
+
                 const data = await response.json();
-                
+
                 if (data.success) {
-                    showStatus(statusEl, '✓ ' + data.message, 'success');
+                    showStatus(statusEl, '\u2713 ' + data.message, 'success');
                     showToast('success', '操作成功', data.message);
                 } else {
-                    showStatus(statusEl, '✗ 操作失败', 'error');
-                    showToast('error', '操作失败', data.message || '未知错误');
+                    showStatus(statusEl, '\u2717 操作失败', 'error');
+                    showToast('error', '操作失败', data.message || '\u672a\u77e5\u9519\u8bef');
                 }
             } catch (error) {
-                showStatus(statusEl, '✗ 连接失败', 'error');
+                showStatus(statusEl, '\u2717 连接失败', 'error');
                 showToast('error', '连接失败', '无法连接到本地服务，请检查服务是否运行');
             } finally {
                 setButtonLoading(btn, false);
@@ -190,29 +224,36 @@ function restartExplorer() {
         async () => {
             const btn = document.getElementById('btnExplorer');
             const statusEl = document.getElementById('statusExplorer');
-            
+
             setButtonLoading(btn, true);
             showStatus(statusEl, '正在重启Explorer...', 'info');
-            
+
             try {
                 const response = await fetch(`${API_BASE_URL}/api/restart/explorer`, {
                     method: 'POST',
                     headers: {
-                        'Accept': 'application/json'
-                    }
+                        'Accept': 'application/json',
+                        'X-CSRF-Token': csrfToken
+                    },
+                    credentials: 'same-origin'
                 });
-                
+
+                if (response.status === 401) {
+                    window.location.href = 'index.html';
+                    return;
+                }
+
                 const data = await response.json();
-                
+
                 if (data.success) {
-                    showStatus(statusEl, '✓ ' + data.message, 'success');
+                    showStatus(statusEl, '\u2713 ' + data.message, 'success');
                     showToast('success', '操作成功', data.message);
                 } else {
-                    showStatus(statusEl, '✗ 操作失败', 'error');
-                    showToast('error', '操作失败', data.message || '未知错误');
+                    showStatus(statusEl, '\u2717 操作失败', 'error');
+                    showToast('error', '操作失败', data.message || '\u672a\u77e5\u9519\u8bef');
                 }
             } catch (error) {
-                showStatus(statusEl, '✗ 连接失败', 'error');
+                showStatus(statusEl, '\u2717 连接失败', 'error');
                 showToast('error', '连接失败', '无法连接到本地服务，请检查服务是否运行');
             } finally {
                 setButtonLoading(btn, false);
@@ -228,33 +269,40 @@ function restartServer() {
     showConfirm(
         'danger',
         '重启服务器',
-        '⚠️ 警告：确定要重启服务器吗？此操作将导致服务器在10秒后重新启动，所有未保存的数据将丢失！',
+        '\u26a0\ufe0f 警告：确定要重启服务器吗？此操作将导致服务器在10秒后重新启动，所有未保存的数据将丢失！',
         async () => {
             const btn = document.getElementById('btnServer');
             const statusEl = document.getElementById('statusServer');
-            
+
             setButtonLoading(btn, true);
             showStatus(statusEl, '正在执行重启命令...', 'info');
-            
+
             try {
                 const response = await fetch(`${API_BASE_URL}/api/restart/server`, {
                     method: 'POST',
                     headers: {
-                        'Accept': 'application/json'
-                    }
+                        'Accept': 'application/json',
+                        'X-CSRF-Token': csrfToken
+                    },
+                    credentials: 'same-origin'
                 });
-                
+
+                if (response.status === 401) {
+                    window.location.href = 'index.html';
+                    return;
+                }
+
                 const data = await response.json();
-                
+
                 if (data.success) {
-                    showStatus(statusEl, '✓ ' + data.message, 'success');
+                    showStatus(statusEl, '\u2713 ' + data.message, 'success');
                     showToast('success', '重启命令已发送', data.message);
                 } else {
-                    showStatus(statusEl, '✗ 操作失败', 'error');
-                    showToast('error', '操作失败', data.message || '未知错误');
+                    showStatus(statusEl, '\u2717 操作失败', 'error');
+                    showToast('error', '操作失败', data.message || '\u672a\u77e5\u9519\u8bef');
                 }
             } catch (error) {
-                showStatus(statusEl, '✗ 连接失败', 'error');
+                showStatus(statusEl, '\u2717 连接失败', 'error');
                 showToast('error', '连接失败', '无法连接到本地服务，请检查服务是否运行');
             } finally {
                 setButtonLoading(btn, false);
@@ -292,15 +340,15 @@ function showConfirm(type, title, message, callback) {
     const modalTitle = document.getElementById('modalTitle');
     const modalMessage = document.getElementById('modalMessage');
     const confirmBtn = document.getElementById('modalConfirmBtn');
-    
+
     modalIcon.className = 'modal-icon ' + type;
     modalTitle.textContent = title;
     modalMessage.textContent = message;
-    
+
     confirmBtn.className = 'modal-btn ' + (type === 'danger' ? 'modal-btn-danger' : 'modal-btn-primary');
-    
+
     confirmCallback = callback;
-    
+
     modal.classList.add('show');
 }
 
@@ -320,16 +368,16 @@ function confirmAction() {
 
 function showToast(type, title, message) {
     const container = document.getElementById('toastContainer');
-    
+
     const toast = document.createElement('div');
     toast.className = 'toast ' + type;
-    
-    const iconSvg = type === 'success' 
+
+    const iconSvg = type === 'success'
         ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>'
         : type === 'error'
         ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>'
         : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>';
-    
+
     toast.innerHTML = `
         <div class="toast-icon">${iconSvg}</div>
         <div class="toast-content">
@@ -343,9 +391,9 @@ function showToast(type, title, message) {
             </svg>
         </button>
     `;
-    
+
     container.appendChild(toast);
-    
+
     setTimeout(() => {
         toast.classList.add('hiding');
         setTimeout(() => {

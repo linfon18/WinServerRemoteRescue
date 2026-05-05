@@ -4,6 +4,8 @@ using System.Net;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Collections.Generic;
+using System.Security.Cryptography;
 
 namespace RemoteRescueApp
 {
@@ -14,9 +16,36 @@ namespace RemoteRescueApp
         private bool _isRunning;
         private string _webRoot;
         private MainForm _mainForm;
-        private const string CORRECT_PASSWORD = "12345";
+        private const string CORRECT_PASSWORD = "123Abc!!";
+
+        // Session管理：token -> (创建时间, 最后活动时间, CSRF Token)
+        private Dictionary<string, SessionInfo> _sessions = new Dictionary<string, SessionInfo>();
+        private readonly object _sessionLock = new object();
+        private const int SESSION_TIMEOUT_MINUTES = 30;
+        private const int SESSION_TIMEOUT_MS = SESSION_TIMEOUT_MINUTES * 60 * 1000;
+
+        // 速率限制：IP -> (失败次数, 首次失败时间, 锁定到期时间)
+        private Dictionary<string, RateLimitInfo> _rateLimits = new Dictionary<string, RateLimitInfo>();
+        private readonly object _rateLock = new object();
+        private const int MAX_LOGIN_ATTEMPTS = 5;
+        private const int RATE_LIMIT_WINDOW_MINUTES = 15;
+        private const int RATE_LIMIT_LOCKOUT_MINUTES = 15;
 
         public bool IsRunning { get { return _isRunning; } }
+
+        private class SessionInfo
+        {
+            public DateTime CreatedAt { get; set; }
+            public DateTime LastActivity { get; set; }
+            public string CsrfToken { get; set; }
+        }
+
+        private class RateLimitInfo
+        {
+            public int FailedAttempts { get; set; }
+            public DateTime FirstFailure { get; set; }
+            public DateTime? LockoutUntil { get; set; }
+        }
 
         public HttpServer(MainForm mainForm)
         {
@@ -95,14 +124,13 @@ namespace RemoteRescueApp
             var response = context.Response;
 
             string clientIP = request.RemoteEndPoint.Address.ToString();
-            // 将IPv6回环地址转换为IPv4，避免localStorage不共享问题
+            // 将IPv6回环地址转换为IPv4
             if (clientIP == "::1")
             {
                 clientIP = "127.0.0.1";
             }
             else if (clientIP.StartsWith("::ffff:"))
             {
-                // IPv4映射的IPv6地址，转换为IPv4
                 clientIP = clientIP.Substring(7);
             }
             string method = request.HttpMethod;
@@ -117,9 +145,12 @@ namespace RemoteRescueApp
                 }
             }
 
+            // 添加安全响应头
+            AddSecurityHeaders(response);
+
             response.Headers.Add("Access-Control-Allow-Origin", "*");
             response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
+            response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token");
 
             if (request.HttpMethod == "OPTIONS")
             {
@@ -136,7 +167,7 @@ namespace RemoteRescueApp
                 }
                 else
                 {
-                    HandleStaticFileRequest(path, response, clientIP);
+                    HandleStaticFileRequest(request, response, path, clientIP);
                 }
             }
             catch (Exception ex)
@@ -144,7 +175,139 @@ namespace RemoteRescueApp
                 if (_mainForm != null)
                     _mainForm.LogMessage("处理请求错误 [" + path + "]: " + ex.Message);
                 response.StatusCode = 500;
-                WriteResponse(response, "Error: " + ex.Message, "text/plain");
+                WriteResponse(response, "{\"success\":false,\"message\":\"服务器内部错误\"}", "application/json");
+            }
+        }
+
+        private void AddSecurityHeaders(HttpListenerResponse response)
+        {
+            response.Headers.Add("X-Content-Type-Options", "nosniff");
+            response.Headers.Add("X-Frame-Options", "DENY");
+            response.Headers.Add("X-XSS-Protection", "1; mode=block");
+            response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+            response.Headers.Add("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+            response.Headers.Add("Cache-Control", "no-store, no-cache, must-revalidate, private");
+            response.Headers.Add("Pragma", "no-cache");
+            response.Headers.Add("Expires", "0");
+            // 如果通过HTTPS访问，添加HSTS
+            // response.Headers.Add("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+        }
+
+        private string GenerateSecureToken()
+        {
+            byte[] tokenBytes = new byte[32];
+            using (var rng = new RNGCryptoServiceProvider())
+            {
+                rng.GetBytes(tokenBytes);
+            }
+            return BitConverter.ToString(tokenBytes).Replace("-", "").ToLower();
+        }
+
+        private string GetSessionToken(HttpListenerRequest request)
+        {
+            // 优先从Cookie获取Session Token
+            Cookie sessionCookie = request.Cookies["session_token"];
+            if (sessionCookie != null && !string.IsNullOrEmpty(sessionCookie.Value))
+            {
+                return sessionCookie.Value;
+            }
+            // 兼容：从URL参数获取（FRP场景）
+            string urlToken = request.QueryString["_token"];
+            if (!string.IsNullOrEmpty(urlToken))
+            {
+                return urlToken;
+            }
+            return null;
+        }
+
+        private bool IsSessionValid(string token)
+        {
+            if (string.IsNullOrEmpty(token)) return false;
+            lock (_sessionLock)
+            {
+                SessionInfo session;
+                if (_sessions.TryGetValue(token, out session))
+                {
+                    if (DateTime.Now.Subtract(session.LastActivity).TotalMilliseconds > SESSION_TIMEOUT_MS)
+                    {
+                        _sessions.Remove(token);
+                        return false;
+                    }
+                    session.LastActivity = DateTime.Now;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void SetSessionCookie(HttpListenerResponse response, string token)
+        {
+            // HttpOnly Cookie，JS无法读取
+            string cookieValue = string.Format("session_token={0}; Path=/; HttpOnly; SameSite=Strict; Max-Age={1}",
+                token, SESSION_TIMEOUT_MINUTES * 60);
+            response.Headers.Add("Set-Cookie", cookieValue);
+        }
+
+        private void ClearSessionCookie(HttpListenerResponse response)
+        {
+            response.Headers.Add("Set-Cookie", "session_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+        }
+
+        private bool CheckRateLimit(string clientIP)
+        {
+            lock (_rateLock)
+            {
+                DateTime now = DateTime.Now;
+                RateLimitInfo info;
+                if (!_rateLimits.TryGetValue(clientIP, out info))
+                {
+                    info = new RateLimitInfo { FailedAttempts = 0, FirstFailure = now };
+                    _rateLimits[clientIP] = info;
+                }
+
+                // 检查是否被锁定
+                if (info.LockoutUntil.HasValue && now < info.LockoutUntil.Value)
+                {
+                    return false;
+                }
+
+                // 如果超过窗口期，重置计数
+                if (now.Subtract(info.FirstFailure).TotalMinutes > RATE_LIMIT_WINDOW_MINUTES)
+                {
+                    info.FailedAttempts = 0;
+                    info.FirstFailure = now;
+                    info.LockoutUntil = null;
+                }
+
+                return true;
+            }
+        }
+
+        private void RecordFailedAttempt(string clientIP)
+        {
+            lock (_rateLock)
+            {
+                RateLimitInfo info;
+                if (!_rateLimits.TryGetValue(clientIP, out info))
+                {
+                    info = new RateLimitInfo { FailedAttempts = 0, FirstFailure = DateTime.Now };
+                    _rateLimits[clientIP] = info;
+                }
+                info.FailedAttempts++;
+                if (info.FailedAttempts >= MAX_LOGIN_ATTEMPTS)
+                {
+                    info.LockoutUntil = DateTime.Now.AddMinutes(RATE_LIMIT_LOCKOUT_MINUTES);
+                    if (_mainForm != null)
+                        _mainForm.LogMessage("→ IP[" + clientIP + "] 登录失败过多，锁定" + RATE_LIMIT_LOCKOUT_MINUTES + "分钟");
+                }
+            }
+        }
+
+        private void RecordSuccessfulAttempt(string clientIP)
+        {
+            lock (_rateLock)
+            {
+                _rateLimits.Remove(clientIP);
             }
         }
 
@@ -152,13 +315,27 @@ namespace RemoteRescueApp
         {
             string path = request.Url.AbsolutePath;
             string json = "";
+            string sessionToken = GetSessionToken(request);
+            bool isAuthenticated = IsSessionValid(sessionToken);
 
             switch (path)
             {
                 case "/api/login":
-                    json = HandleLogin(request, clientIP);
+                    json = HandleLogin(request, response, clientIP);
+                    break;
+                case "/api/logout":
+                    json = HandleLogout(response, sessionToken);
+                    break;
+                case "/api/csrf-token":
+                    json = HandleCsrfToken(sessionToken);
                     break;
                 case "/api/status":
+                    if (!isAuthenticated)
+                    {
+                        response.StatusCode = 401;
+                        json = "{\"success\": false, \"message\": \"未认证\", \"code\": \"UNAUTHORIZED\"}";
+                        break;
+                    }
                     var info = SystemManager.GetSystemInfo();
                     var explorerInfo = SystemManager.GetExplorerInfo();
                     var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
@@ -167,6 +344,20 @@ namespace RemoteRescueApp
                         _mainForm.LogMessage("→ 返回系统状态信息");
                     break;
                 case "/api/restart/rdp":
+                    if (!isAuthenticated)
+                    {
+                        response.StatusCode = 401;
+                        json = "{\"success\": false, \"message\": \"未认证\", \"code\": \"UNAUTHORIZED\"}";
+                        break;
+                    }
+                    if (!VerifyCsrfToken(request, sessionToken))
+                    {
+                        response.StatusCode = 403;
+                        json = "{\"success\": false, \"message\": \"CSRF验证失败\", \"code\": \"CSRF_ERROR\"}";
+                        if (_mainForm != null)
+                            _mainForm.LogMessage("→ CSRF验证失败 [" + clientIP + "]");
+                        break;
+                    }
                     if (_mainForm != null)
                         _mainForm.LogMessage("→ 执行RDP服务重启操作...");
                     var rdpResult = SystemManager.RestartRDPService();
@@ -175,6 +366,20 @@ namespace RemoteRescueApp
                         _mainForm.LogMessage("→ RDP操作结果: " + rdpResult);
                     break;
                 case "/api/restart/explorer":
+                    if (!isAuthenticated)
+                    {
+                        response.StatusCode = 401;
+                        json = "{\"success\": false, \"message\": \"未认证\", \"code\": \"UNAUTHORIZED\"}";
+                        break;
+                    }
+                    if (!VerifyCsrfToken(request, sessionToken))
+                    {
+                        response.StatusCode = 403;
+                        json = "{\"success\": false, \"message\": \"CSRF验证失败\", \"code\": \"CSRF_ERROR\"}";
+                        if (_mainForm != null)
+                            _mainForm.LogMessage("→ CSRF验证失败 [" + clientIP + "]");
+                        break;
+                    }
                     if (_mainForm != null)
                         _mainForm.LogMessage("→ 执行Explorer重启操作...");
                     var expResult = SystemManager.RestartExplorer();
@@ -183,6 +388,20 @@ namespace RemoteRescueApp
                         _mainForm.LogMessage("→ Explorer操作结果: " + expResult);
                     break;
                 case "/api/restart/server":
+                    if (!isAuthenticated)
+                    {
+                        response.StatusCode = 401;
+                        json = "{\"success\": false, \"message\": \"未认证\", \"code\": \"UNAUTHORIZED\"}";
+                        break;
+                    }
+                    if (!VerifyCsrfToken(request, sessionToken))
+                    {
+                        response.StatusCode = 403;
+                        json = "{\"success\": false, \"message\": \"CSRF验证失败\", \"code\": \"CSRF_ERROR\"}";
+                        if (_mainForm != null)
+                            _mainForm.LogMessage("→ CSRF验证失败 [" + clientIP + "]");
+                        break;
+                    }
                     if (_mainForm != null)
                         _mainForm.LogMessage("→ 执行服务器重启操作...");
                     var srvResult = SystemManager.RestartServer();
@@ -192,7 +411,7 @@ namespace RemoteRescueApp
                     break;
                 default:
                     response.StatusCode = 404;
-                    json = "{\"error\": \"Not Found\"}";
+                    json = "{\"success\": false, \"message\": \"接口不存在\"}";
                     if (_mainForm != null)
                         _mainForm.LogMessage("→ API未找到: " + path);
                     break;
@@ -201,10 +420,65 @@ namespace RemoteRescueApp
             WriteResponse(response, json, "application/json");
         }
 
-        private string HandleLogin(HttpListenerRequest request, string clientIP)
+        private bool VerifyCsrfToken(HttpListenerRequest request, string sessionToken)
+        {
+            if (string.IsNullOrEmpty(sessionToken)) return false;
+            string csrfHeader = request.Headers["X-CSRF-Token"];
+            if (string.IsNullOrEmpty(csrfHeader)) return false;
+            lock (_sessionLock)
+            {
+                SessionInfo session;
+                if (_sessions.TryGetValue(sessionToken, out session))
+                {
+                    return session.CsrfToken == csrfHeader;
+                }
+            }
+            return false;
+        }
+
+        private string HandleCsrfToken(string sessionToken)
+        {
+            if (!IsSessionValid(sessionToken))
+            {
+                return "{\"success\": false, \"message\": \"未认证\"}";
+            }
+            lock (_sessionLock)
+            {
+                SessionInfo session;
+                if (_sessions.TryGetValue(sessionToken, out session))
+                {
+                    return "{\"success\": true, \"token\": \"" + session.CsrfToken + "\"}";
+                }
+            }
+            return "{\"success\": false, \"message\": \"会话无效\"}";
+        }
+
+        private string HandleLogout(HttpListenerResponse response, string sessionToken)
+        {
+            if (!string.IsNullOrEmpty(sessionToken))
+            {
+                lock (_sessionLock)
+                {
+                    _sessions.Remove(sessionToken);
+                }
+            }
+            ClearSessionCookie(response);
+            return "{\"success\": true, \"message\": \"已退出登录\"}";
+        }
+
+        private string HandleLogin(HttpListenerRequest request, HttpListenerResponse response, string clientIP)
         {
             try
             {
+                // 速率限制检查
+                if (!CheckRateLimit(clientIP))
+                {
+                    if (_mainForm != null)
+                        _mainForm.LogMessage("→ 登录被拒绝 [" + clientIP + "]: 请求过于频繁");
+                    response.StatusCode = 429;
+                    return "{\"success\": false, \"message\": \"尝试次数过多，请" + RATE_LIMIT_LOCKOUT_MINUTES + "分钟后再试\", \"code\": \"RATE_LIMITED\"}";
+                }
+
                 string password = "";
                 string body = "";
                 using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
@@ -215,11 +489,6 @@ namespace RemoteRescueApp
                 if (_mainForm != null)
                 {
                     _mainForm.LogMessage("→ 收到登录请求 [" + clientIP + "]");
-                    _mainForm.LogMessage("→ 请求体: [" + body + "]");
-                    _mainForm.LogMessage("→ Content-Type: [" + request.ContentType + "]");
-                    _mainForm.LogMessage("→ Content-Encoding: [" + request.ContentEncoding + "]");
-                    _mainForm.LogMessage("→ 请求体长度: " + body.Length);
-                    _mainForm.LogMessage("→ 请求体字节: " + BitConverter.ToString(System.Text.Encoding.UTF8.GetBytes(body)).Replace("-", ""));
                 }
 
                 // 支持表单格式: password=xxx
@@ -227,35 +496,49 @@ namespace RemoteRescueApp
                 {
                     password = body.Substring(9);
                     password = System.Uri.UnescapeDataString(password);
-                    if (_mainForm != null)
-                        _mainForm.LogMessage("→ 表单解析密码: [" + password + "]");
                 }
                 else
                 {
-                    // 健壮的JSON密码解析
                     password = ExtractPasswordFromJson(body);
-                    if (_mainForm != null)
-                        _mainForm.LogMessage("→ JSON解析密码: [" + password + "]");
                 }
 
                 if (password == CORRECT_PASSWORD)
                 {
+                    RecordSuccessfulAttempt(clientIP);
+
+                    // 创建安全Session
+                    string sessionToken = GenerateSecureToken();
+                    string csrfToken = GenerateSecureToken();
+                    lock (_sessionLock)
+                    {
+                        _sessions[sessionToken] = new SessionInfo
+                        {
+                            CreatedAt = DateTime.Now,
+                            LastActivity = DateTime.Now,
+                            CsrfToken = csrfToken
+                        };
+                    }
+
+                    // 设置HttpOnly Cookie
+                    SetSessionCookie(response, sessionToken);
+
                     if (_mainForm != null)
                         _mainForm.LogMessage("→ 登录成功 [" + clientIP + "]");
-                    return "{\"success\": true, \"message\": \"登录成功\"}";
+                    return "{\"success\": true, \"message\": \"登录成功\", \"token\": \"" + sessionToken + "\", \"csrfToken\": \"" + csrfToken + "\"}";
                 }
                 else
                 {
+                    RecordFailedAttempt(clientIP);
                     if (_mainForm != null)
-                        _mainForm.LogMessage("→ 登录失败 [" + clientIP + "]: 密码不匹配, 期望长度:" + CORRECT_PASSWORD.Length + ", 实际长度:" + password.Length);
-                    return "{\"success\": false, \"message\": \"密码错误\"}";
+                        _mainForm.LogMessage("→ 登录失败 [" + clientIP + "]: 密码错误");
+                    return "{\"success\": false, \"message\": \"密码错误\", \"code\": \"INVALID_PASSWORD\"}";
                 }
             }
             catch (Exception ex)
             {
                 if (_mainForm != null)
                     _mainForm.LogMessage("→ 登录处理错误: " + ex.Message);
-                return "{\"success\": false, \"message\": \"验证失败\"}";
+                return "{\"success\": false, \"message\": \"验证失败\", \"code\": \"ERROR\"}";
             }
         }
 
@@ -302,11 +585,26 @@ namespace RemoteRescueApp
             return "";
         }
 
-        private void HandleStaticFileRequest(string path, HttpListenerResponse response, string clientIP)
+        private void HandleStaticFileRequest(HttpListenerRequest request, HttpListenerResponse response, string path, string clientIP)
         {
             if (path == "/" || string.IsNullOrEmpty(path))
             {
                 path = "/index.html";
+            }
+
+            // 保护main.html：需要有效Session
+            if (path.Equals("/main.html", StringComparison.OrdinalIgnoreCase))
+            {
+                string sessionToken = GetSessionToken(request);
+                if (!IsSessionValid(sessionToken))
+                {
+                    if (_mainForm != null)
+                        _mainForm.LogMessage("→ 未认证访问main.html，重定向到登录页 [" + clientIP + "]");
+                    response.StatusCode = 302;
+                    response.Headers.Add("Location", "/index.html");
+                    response.Close();
+                    return;
+                }
             }
 
             string filePath = Path.Combine(_webRoot, path.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
@@ -316,7 +614,7 @@ namespace RemoteRescueApp
                 if (_mainForm != null && !path.StartsWith("/favicon"))
                     _mainForm.LogMessage("→ 文件未找到: " + path);
                 response.StatusCode = 404;
-                WriteResponse(response, "File not found", "text/plain");
+                WriteResponse(response, "<!DOCTYPE html><html><head><title>404</title></head><body><h1>404</h1><p>The requested page was not found.</p></body></html>", "text/html");
                 return;
             }
 
