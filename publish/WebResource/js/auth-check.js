@@ -1,5 +1,4 @@
 (function() {
-    const SESSION_TIMEOUT = 30 * 60 * 1000;
     const TOKEN_PARAM = '_token';
     const DEBUG = false;
 
@@ -21,23 +20,33 @@
     window.AuthCheck = {
         isAuthenticated: function() {
             log('=== 开始认证检查 ===');
-            log('当前URL: ' + window.location.href);
+            // 认证状态由服务端管理，前端无法直接判断
+            // 返回true让页面继续加载，实际认证由服务端在API层面控制
+            return true;
+        },
 
-            // 检查URL参数（FRP场景）
-            var urlToken = getUrlParam(TOKEN_PARAM);
-            log('URL Token: ' + urlToken);
-
-            if (urlToken) {
-                log('URL参数已清除');
-                var url = new URL(window.location.href);
-                url.searchParams.delete(TOKEN_PARAM);
-                window.history.replaceState({}, '', url.toString());
-            }
-
-            // 认证状态由服务端Cookie管理，前端不做判断
-            // 服务端会在访问main.html时验证Session
-            log('认证状态由服务端管理');
-            return false;
+        // 异步验证会话
+        validateSession: function() {
+            return fetch('/api/csrf-token', {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            })
+            .then(function(response) {
+                if (response.status === 401) {
+                    log('会话验证失败: 未认证');
+                    return false;
+                }
+                return response.json().then(function(data) {
+                    var valid = data.success === true;
+                    log('会话验证结果: ' + valid);
+                    return valid;
+                });
+            })
+            .catch(function(error) {
+                log('会话验证错误: ' + error);
+                return false;
+            });
         },
 
         login: function() {
@@ -56,9 +65,10 @@
 
         checkAuth: function() {
             log('=== checkAuth 被调用 ===');
-            // 认证由服务端在main.html请求时验证
-            // 如果未认证，服务端会302重定向到index.html
-            // 这里仅做辅助检查
+            // HttpOnly Cookie 前端JS无法读取，不能通过document.cookie判断
+            // 服务端已在返回main.html时做了认证检查（未认证会302跳转）
+            // 前端这里直接返回true，让页面正常加载
+            // 后续的API调用会由服务端验证Cookie有效性
             return true;
         }
     };
