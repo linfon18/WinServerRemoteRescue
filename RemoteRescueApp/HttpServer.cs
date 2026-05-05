@@ -17,7 +17,7 @@ namespace RemoteRescueApp
         private bool _isRunning;
         private string _webRoot;
         private MainForm _mainForm;
-        private const string CORRECT_PASSWORD = "123Abc!!";
+        private const string CORRECT_PASSWORD = "12345";
 
         // Session管理：token -> (创建时间, 最后活动时间, CSRF Token)
         private Dictionary<string, SessionInfo> _sessions = new Dictionary<string, SessionInfo>();
@@ -123,60 +123,87 @@ namespace RemoteRescueApp
             var context = (HttpListenerContext)state;
             var request = context.Request;
             var response = context.Response;
-
-            string clientIP = request.RemoteEndPoint.Address.ToString();
-            // 将IPv6回环地址转换为IPv4
-            if (clientIP == "::1")
-            {
-                clientIP = "127.0.0.1";
-            }
-            else if (clientIP.StartsWith("::ffff:"))
-            {
-                clientIP = clientIP.Substring(7);
-            }
-            string method = request.HttpMethod;
-            string path = request.Url.AbsolutePath;
-
-            if (_mainForm != null)
-            {
-                _mainForm.IncrementRequestCount();
-                if (!path.StartsWith("/bg/") && !path.StartsWith("/css/") && !path.StartsWith("/js/"))
-                {
-                    _mainForm.LogMessage("[" + clientIP + "] " + method + " " + path);
-                }
-            }
-
-            // 添加安全响应头
-            AddSecurityHeaders(response);
-
-            response.Headers.Add("Access-Control-Allow-Origin", "*");
-            response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token");
-
-            if (request.HttpMethod == "OPTIONS")
-            {
-                response.StatusCode = 200;
-                response.Close();
-                return;
-            }
+            string path = "";
 
             try
             {
-                if (path.StartsWith("/api/"))
+                string clientIP = request.RemoteEndPoint.Address.ToString();
+                // 将IPv6回环地址转换为IPv4
+                if (clientIP == "::1")
                 {
-                    HandleApiRequest(request, response, clientIP);
+                    clientIP = "127.0.0.1";
                 }
-                else
+                else if (clientIP.StartsWith("::ffff:"))
                 {
-                    HandleStaticFileRequest(request, response, path, clientIP);
+                    clientIP = clientIP.Substring(7);
+                }
+                string method = request.HttpMethod;
+                path = request.Url.AbsolutePath;
+
+                if (_mainForm != null)
+                {
+                    _mainForm.IncrementRequestCount();
+                    if (!path.StartsWith("/bg/") && !path.StartsWith("/css/") && !path.StartsWith("/js/"))
+                    {
+                        _mainForm.LogMessage("[" + clientIP + "] " + method + " " + path);
+                    }
+                }
+
+                // 添加安全响应头
+                AddSecurityHeaders(response);
+
+                response.Headers.Add("Access-Control-Allow-Origin", "*");
+                response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token");
+
+                if (request.HttpMethod == "OPTIONS")
+                {
+                    response.StatusCode = 200;
+                    response.Close();
+                    return;
+                }
+
+                try
+                {
+                    if (path.StartsWith("/api/"))
+                    {
+                        HandleApiRequest(request, response, clientIP);
+                    }
+                    else
+                    {
+                        HandleStaticFileRequest(request, response, path, clientIP);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_mainForm != null)
+                        _mainForm.LogMessage("处理请求错误 [" + path + "]: " + ex.Message);
+                    try
+                    {
+                        if (response.OutputStream.CanWrite)
+                        {
+                            response.StatusCode = 500;
+                            byte[] buffer = Encoding.UTF8.GetBytes("{\"success\":false,\"message\":\"服务器内部错误\"}");
+                            response.ContentType = "application/json";
+                            response.ContentLength64 = buffer.Length;
+                            response.OutputStream.Write(buffer, 0, buffer.Length);
+                            response.Close();
+                        }
+                    }
+                    catch (Exception innerEx)
+                    {
+                        if (_mainForm != null)
+                            _mainForm.LogMessage("错误响应发送失败 [" + path + "]: " + innerEx.Message);
+                        try { response.Close(); } catch { }
+                    }
                 }
             }
-            catch (Exception ex)
+            catch (Exception fatalEx)
             {
+                // 最外层保护：任何未捕获异常都不应导致线程崩溃
                 if (_mainForm != null)
-                    _mainForm.LogMessage("处理请求错误 [" + path + "]: " + ex.Message);
-                response.StatusCode = 500;
-                WriteResponse(response, "{\"success\":false,\"message\":\"服务器内部错误\"}", "application/json");
+                    _mainForm.LogMessage("请求处理致命错误 [" + path + "]: " + fatalEx.Message);
+                try { response.Close(); } catch { }
             }
         }
 
